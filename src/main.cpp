@@ -1,133 +1,104 @@
-// Late Click Buffer - GD 2.2081
-// A click is held until the first tick where clicking keeps the player alive.
-// "Alive" is decided by running the real game physics forward from a checkpoint
-// snapshot, then restoring the snapshot.
 #include <Geode/Geode.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
-#include <Geode/modify/PlayLayer.hpp>
-#include <Geode/modify/FMODAudioEngine.hpp>
 #include <chrono>
 #include <deque>
 
 using namespace geode::prelude;
 
 namespace {
-    struct Ev { bool down; int button; bool p1; int waited = 0; };
+    struct Held { bool down; int button; bool p1; int waited; };
 
-    std::deque<Ev> g_queue;
-    bool g_sim = false;      // running a prediction
-    bool g_simDied = false;
-    bool g_simDone = false;  // level ended during prediction (counts as survived)
-    bool g_deliver = false;  // we are sending a held event ourselves
-    bool g_on = true;
+    std::deque<Held> g_held;
+    bool g_inSim = false;       // true while we are testing a click
+    bool g_simDead = false;     // set when the test run kills the player
+    bool g_delivering = false;  // true while we send a held click ourselves
 
     constexpr float STEP = 1.f / 240.f;
 
-    PlayLayer* pl() { return PlayLayer::get(); }
+    bool enabled() {
+        return Mod::get()->getSettingValue<bool>("enabled");
+    }
 
-    // true = clicking on the current tick survives `horizon` ticks
-    bool clickSurvives(GJBaseGameLayer* gl, int button, bool p1) {
-        auto layer = pl();
-        if (!layer || (GJBaseGameLayer*)layer != gl) return true;
+    // Returns true if clicking now survives `horizon` ticks.
+    // Uses the game's own death flag. Restores the level afterwards.
+    bool survives(GJBaseGameLayer* gl, int button, bool p1) {
+        auto pl = PlayLayer::get();
+        if (!pl || static_cast<GJBaseGameLayer*>(pl) != gl) return true;
 
         int horizon = (int)Mod::get()->getSettingValue<int64_t>("horizon");
         double budget = Mod::get()->getSettingValue<double>("budget-ms");
 
-        auto cp = layer->createCheckpoint();
+        auto cp = pl->createCheckpoint();
         if (!cp) return true;
-        cp->retain();
 
         auto t0 = std::chrono::steady_clock::now();
-        g_sim = true; g_simDied = false; g_simDone = false;
+        g_inSim = true;
+        g_simDead = false;
 
         gl->handleButton(true, button, p1);
         bool timedOut = false;
-        for (int i = 0; i < horizon && !g_simDied && !g_simDone; ++i) {
-            gl->processCommands(STEP, false, i == horizon - 1);
-            if (gl->m_player1 && gl->m_player1->m_isDead) g_simDied = true;
+        for (int i = 0; i < horizon && !g_simDead; ++i) {
+            gl->processCommands(STEP, false, false);
+            if (gl->m_player1 && gl->m_player1->m_isDead) {
+                g_simDead = true;
+                break;
+            }
             if ((i & 7) == 7) {
                 double ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
                 if (ms > budget) { timedOut = true; break; }
             }
         }
-        bool died = g_simDied;
-        g_sim = false;
-        layer->loadFromCheckpoint(cp);
-        cp->release();
 
-        if (timedOut) return true; // out of time: fail open, click now
+        bool died = g_simDead;
+        g_inSim = false;
+        g_simDead = false;
+
+        pl->loadFromCheckpoint(cp);
+
+        if (timedOut) return true; // out of time, send the click now
         return !died;
-    }
-
-    bool active(GJBaseGameLayer* gl) {
-        if (!g_on || g_sim || g_deliver) return false;
-        if (!Mod::get()->getSettingValue<bool>("enabled")) return false;
-        auto layer = pl();
-        if (!layer || (GJBaseGameLayer*)layer != gl) return false;
-        return !layer->m_isPaused && !layer->m_levelEndAnimationStarted;
     }
 }
 
 class $modify(LCBBase, GJBaseGameLayer) {
     void handleButton(bool down, int button, bool isPlayer1) {
-        // only the jump button is buffered
-        if (button != 1 || !active(this)) {
+        // Only buffer the jump button, and only when the mod is on and we are not testing.
+        if (button != 1 || g_inSim || g_delivering || !enabled()) {
             return GJBaseGameLayer::handleButton(down, button, isPlayer1);
         }
-        if (!g_queue.empty()) { // keep order behind a held click
-            g_queue.push_back({down, button, isPlayer1});
+
+        // Keep order: if a click is already held, queue this event behind it.
+        if (!g_held.empty()) {
+            g_held.push_back({down, button, isPlayer1, 0});
             return;
         }
-        if (!down || clickSurvives(this, button, isPlayer1)) {
+
+        if (!down || survives(this, button, isPlayer1)) {
             return GJBaseGameLayer::handleButton(down, button, isPlayer1);
         }
-        g_queue.push_back({down, button, isPlayer1});
+
+        g_held.push_back({down, button, isPlayer1, 0});
     }
 
     void processCommands(float dt, bool halfTick, bool lastTick) {
-        if (!g_sim && !g_queue.empty()) {
-            if (!active(this)) {
-                g_queue.clear();
+        if (!g_inSim && !g_held.empty()) {
+            if (!enabled()) {
+                g_held.clear();
             } else {
-                auto& e = g_queue.front();
+                auto& h = g_held.front();
                 int maxWait = (int)Mod::get()->getSettingValue<int64_t>("max-wait");
-                bool go = !e.down || ++e.waited > maxWait
-                          || clickSurvives(this, e.button, e.p1);
+                bool go = !h.down || ++h.waited > maxWait
+                          || survives(this, h.button, h.p1);
                 if (go) {
-                    Ev ev = e;
-                    g_queue.pop_front();
-                    g_deliver = true;
+                    Held ev = h;
+                    g_held.pop_front();
+                    g_delivering = true;
                     GJBaseGameLayer::handleButton(ev.down, ev.button, ev.p1);
-                    g_deliver = false;
+                    g_delivering = false;
                 }
             }
         }
         GJBaseGameLayer::processCommands(dt, halfTick, lastTick);
-    }
-};
-
-class $modify(LCBPlay, PlayLayer) {
-    void destroyPlayer(PlayerObject* p, GameObject* o) {
-        if (g_sim) { g_simDied = true; return; }
-        g_queue.clear();
-        PlayLayer::destroyPlayer(p, o);
-    }
-    void playEndAnimationToPos(CCPoint pos) {
-        if (g_sim) { g_simDone = true; return; }
-        PlayLayer::playEndAnimationToPos(pos);
-    }
-    void levelComplete() {
-        if (g_sim) { g_simDone = true; return; }
-        PlayLayer::levelComplete();
-    }
-    void resetLevel() { g_queue.clear(); PlayLayer::resetLevel(); }
-    void onQuit() { g_queue.clear(); PlayLayer::onQuit(); }
-};
-
-class $modify(LCBAudio, FMODAudioEngine) {
-    int playEffect(gd::string path, float speed, float unk, float volume) {
-        if (g_sim && Mod::get()->getSettingValue<bool>("mute-sim")) return 0;
-        return FMODAudioEngine::playEffect(path, speed, unk, volume);
     }
 };
