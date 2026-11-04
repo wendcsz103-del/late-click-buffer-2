@@ -1,0 +1,16 @@
+{
+	"geode": "5.0.0",
+	"gd": { "win": "2.2081" },
+	"version": "v1.0.0",
+	"id": "ai.lateclickbuffer",
+	"name": "Late Click Buffer",
+	"developer": "you",
+	"description": "Hold a click until the first frame where clicking keeps you alive, then click on that frame.",
+	"settings": {
+		"enabled": { "type": "bool", "name": "Enabled", "description": "Master switch.", "default": true },
+		"max-wait": { "type": "int", "name": "Max wait (ticks)", "description": "How long a click may wait for a living frame before it is sent anyway. 240 ticks = 1 second.", "default": 480, "min": 1, "max": 2400 },
+		"horizon": { "type": "int", "name": "Survive check length (ticks)", "description": "A frame is 'living' if you survive this many ticks after clicking on it.", "default": 90, "min": 8, "max": 480 },
+		"budget-ms": { "type": "float", "name": "Prediction budget (ms)", "description": "Max time per prediction. If exceeded the click is sent immediately.", "default": 4.0, "min": 0.5, "max": 30.0 },
+		"mute-sim": { "type": "bool", "name": "Mute prediction sounds", "default": true }
+	}
+}
