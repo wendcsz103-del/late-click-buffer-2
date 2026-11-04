@@ -1,7 +1,7 @@
 {
-	"geode": "5.0.0",
+	"geode": "6.0.0-alpha.1",
 	"gd": { "win": "2.2081" },
-	"version": "geode": "6.0.0-alpha.1",
+	"version": "geode": "v1.0.0",
 	"id": "ai.lateclickbuffer",
 	"name": "Late Click Buffer",
 	"developer": "you",
